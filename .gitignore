@@ -1,0 +1,20 @@
+node_modules/
+*.tgz
+
+# Local credentials, browser state and project data
+.env
+.env.*
+.olauth
+session.json
+credentials.json
+auth/
+backups/
+locks/
+browser-profile/
+chrome-profile/
+playwright/.auth/
+storage-state*.json
+*.log
+out/
+artifacts/
+.DS_Store

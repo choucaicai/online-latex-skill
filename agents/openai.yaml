@@ -1,0 +1,4 @@
+interface:
+  display_name: "LaTeX Workspace"
+  short_description: "统一操作 Overleaf 与 TeXPage 的账号、项目、文档和编译"
+  default_prompt: "使用 $latex-workspace 查看我的 Overleaf 和 TeXPage 项目，读取文档并按要求修改、编译。"

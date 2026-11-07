@@ -1,0 +1,29 @@
+{
+  "name": "@local/latex-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "latex-workspace": "scripts/latex-workspace.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "dependencies": {
+    "claudeleaf": "0.3.0",
+    "playwright-core": "1.56.1"
+  },
+  "description": "Agent skill and unified CLI for Overleaf and TeXPage projects, editing, and cloud compilation.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/choucaicai/online-latex-skill.git"
+  },
+  "homepage": "https://github.com/choucaicai/online-latex-skill#readme",
+  "bugs": {
+    "url": "https://github.com/choucaicai/online-latex-skill/issues"
+  }
+}
