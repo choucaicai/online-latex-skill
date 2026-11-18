@@ -59,6 +59,8 @@ latex-workspace file write --provider texpage --project PROJECT_ID --path main.t
 
 写入前检查原文并保存本地备份；写入后读取远端文件核对内容。成功需检查 `verified: true`。Overleaf 的 `file edit` 使用实时文本操作；TeXPage 将编辑结果通过 CRDT 通道整文件写回。`--if-match` 是写前检查，不能当作平台提供的原子事务。
 
+TeXPage CLI 仅在项目使用实时同步时写入。写入时避免用同账号在其他编辑器标签页同时编辑同一文件。遇到 `TEXPAGE_SYNC_MODE`，核对网页的同步模式；手动提交模式下，使用网页编辑并提交，不自动切换设置或提交项目草稿。
+
 遇到 `VERSION_CONFLICT`、`EDIT_MATCH_CONFLICT` 或 `WRITE_UNVERIFIED`，先重新读取远端再决定下一步。连接中断或部分操作失败时，检查错误里的 `backup` 路径和当前远端内容；不要直接重放写入或自动回滚。恢复方法见 [references/backends.md](references/backends.md)。
 
 ## 编译与下载

@@ -35,7 +35,7 @@ export class TexpageBackend {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 30000);
       try {
-        const r = await fetch(route, { credentials: 'include', signal: controller.signal });
+        const r = await fetch(route, { credentials: 'include', cache: text ? 'no-store' : 'default', signal: controller.signal });
         const body = await r.text();
         let json;
         try { json = JSON.parse(body); } catch { /* handled outside the browser */ }
@@ -167,8 +167,31 @@ export class TexpageBackend {
 
   async write(project, file, content, { before } = {}) {
     const entry = await this.file(project, file);
-    // Supply a final precondition inside the socket's joinedDoc phase, before emitting ops.
-    try { await replaceDocContent(await this.open(), this.ref(project), entry.fileKey, content, 30000, before); }
+    const page = await this.open();
+    const ref = this.ref(project);
+    const settings = await page.evaluate(async ({ projectKey, versionNo }) => {
+      const route = `/project/user/${encodeURIComponent(projectKey)}/${encodeURIComponent(versionNo)}`;
+      const response = await fetch(route, { credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(15000) });
+      if (!response.ok) return null;
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+      for (const script of doc.scripts) {
+        const match = script.textContent.match(/^\s*window\._PAGE_PARAMS\s*=\s*(\{[\s\S]*\})\s*;?\s*$/);
+        if (!match) continue;
+        try {
+          const params = JSON.parse(match[1]);
+          if (params.projectKey === projectKey && params.versionNo === versionNo) {
+            return { mode: params.projectSettings?.syncType, site: params.userKey };
+          }
+        } catch { return null; }
+      }
+      return null;
+    }, ref);
+    if (settings?.mode !== 'sync') {
+      throw new WorkspaceError('TEXPAGE_SYNC_MODE', settings?.mode === 'async'
+        ? 'TeXPage is in manual commit mode; the CLI does not submit project-wide drafts. Use the editor to write and commit.'
+        : 'Could not confirm TeXPage real-time sync mode; no write was sent.');
+    }
+    try { await replaceDocContent(page, ref, entry.fileKey, content, 30000, before, settings.site); }
     catch (e) {
       if (e.message.includes('VERSION_CONFLICT:')) throw new WorkspaceError('VERSION_CONFLICT', 'The document changed before the TeXPage write; read it again.');
       throw e;

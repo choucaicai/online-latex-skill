@@ -7,7 +7,7 @@
 - Skill 采用 CLI + 指令文件结构，参考 [aloth/overleaf-skill](https://github.com/aloth/overleaf-skill)。本工具提供独立的双平台 CLI，没有复制其 skill 文本。
 - Overleaf：依赖 [lonetis/claudeleaf](https://github.com/lonetis/claudeleaf)，npm `claudeleaf@0.3.0`，MIT。通过公开 SDK 完成浏览器登录、项目列表、实时文档读写、编译。依赖许可保留在 npm 包内。
 - TeXPage：`scripts/vendor/texpage/utils.js` 基于 [dull-bird/opencli-plugin-texpage](https://github.com/dull-bird/opencli-plugin-texpage)，固定来源提交 `a751f0d867c83079794513de00c4e740b4b0ae44`，MIT；许可位于同目录 `LICENSE`。本工具直接调用复制的编译/CRDT 辅助函数，浏览器会话和 HTTP 适配由本工具提供，不依赖 OpenCLI 的运行环境。
-- 本地修改：TeXPage 文档加入后、发出写操作前核对原文；拒绝被拒绝的项目加入和无效文档响应；只在发出本次写入后等待确认；分块保留 Unicode 代理对；编译日志先识别警告，防止将带文件行号的警告归为错误。
+- TeXPage 写入从目标版本的网页设置确认实时同步模式及编辑身份，再通过 `joinedDoc` 读取文档版本与现有 CRDT 序号。写入前再次核对原文，每批最多 100 条操作，按对应批次的 Socket.IO 回执确认后再发送下一批。服务端拒绝或确认丢失时不重放批次。
 - 浏览器运行时固定 `playwright-core@1.56.1`，使用安装好的 Chrome 或 Edge，依赖精确版本及完整性由 `package-lock.json` 固定。
 
 ## 本地安装
@@ -39,6 +39,7 @@ npm ci --ignore-scripts --no-audit --no-fund
 | `AMBIGUOUS_PROJECT` | 展示同名项目的 ID，由用户目标确定后再操作 |
 | `VERSION_CONFLICT` | 重新读取文件并重新应用用户要求的编辑 |
 | `EDIT_MATCH_CONFLICT` | 扩大原文上下文，使替换对象唯一 |
+| `TEXPAGE_SYNC_MODE` | 在网页确认项目的同步模式；手动提交模式下使用网页编辑并提交，CLI 不切换设置或提交项目草稿 |
 | `WRITE_FAILED` / `WRITE_UNVERIFIED` | 先读取当前远端状态，查看错误给出的本地备份，禁止盲目重试 |
 | `MAIN_FILE_REQUIRED` | 从 TeXPage 文件树找到主文档，通过 `--main-file` 指定 |
 | `LOG_UNAVAILABLE` | 未能检查编译日志，不能将本次编译报告为成功 |

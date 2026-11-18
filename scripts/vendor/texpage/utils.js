@@ -108,140 +108,142 @@ async function resolveFile(page, ref, path) {
   return file.fileKey;
 }
 // Locally adapted from dull-bird/opencli-plugin-texpage (MIT; see LICENSE).
-// Add a joined-document text precondition and reject malformed/denied joins.
-async function replaceDocContent(page, ref, fileKey, text, timeoutMs = 3e4, expectedText) {
-  return page.evaluate(
-    `(async () => {
-      const P = ${JSON.stringify({ ...ref, fileKey, text, expectedText })};
-      const CHUNK = 200;
-      const extent = (s) => {
-        const parts = s.split('\\n');
-        return { row: parts.length - 1, column: parts[parts.length - 1].length };
+async function replaceDocContent(page, ref, fileKey, text, timeoutMs = 3e4, expectedText, site) {
+  return page.evaluate(async ({ ownerKey, projectKey, versionNo, fileKey, text, timeoutMs, expectedText, site }) => {
+    if (typeof expectedText !== 'string') throw new Error('Missing write precondition');
+    if (typeof site !== 'string' || !site) throw new Error('Missing TeXPage editor identity');
+    const chunkSize = 200;
+    const batchSize = 100;
+    const roomId = `${fileKey}_${versionNo}`;
+    const fileUrl = '/api/project/file?' + new URLSearchParams({ fileKey, projectKey, versionNo });
+    const origin = { row: 0, column: 0 };
+    const extent = value => {
+      const lines = value.split('\n');
+      return { row: lines.length - 1, column: lines.at(-1).length };
+    };
+
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket('wss://socket.texpage.com/socket.io/?EIO=4&transport=websocket');
+      const controller = new AbortController();
+      const timer = setTimeout(() => finish(new Error('TeXPage write timed out')), timeoutMs);
+      const existing = [];
+      const outOps = [];
+      let phase = 'connect';
+      let documentVersion, total, batchId;
+      let ackId = 0;
+      let offset = 0;
+      const send = (event, data, id = '') => socket.send(`42${id}${JSON.stringify([event, data])}`);
+
+      function finish(error) {
+        if (phase === 'done') return;
+        phase = 'done';
+        clearTimeout(timer);
+        controller.abort();
+        socket.close();
+        if (error) reject(error);
+        else resolve({ chunks: outOps.length });
+      }
+
+      function sendBatch() {
+        if (offset >= outOps.length) return finish();
+        const operations = outOps.slice(offset, offset + batchSize);
+        batchId = crypto.randomUUID();
+        send('operations', { batchId, syncType: 'sync', operations, v: documentVersion,
+          range: { start: origin, end: origin } }, ackId);
+      }
+
+      socket.onmessage = async ({ data }) => {
+        if (phase === 'done' || typeof data !== 'string') return;
+        try {
+          if (data === '2') { socket.send('3'); return; }
+          if (phase === 'connect' && data.startsWith('0')) { socket.send('40'); return; }
+          if (phase === 'connect' && data.startsWith('40')) {
+            phase = 'room';
+            send('request', { request: { requestId: 'join', action: 'post:/api/project/joinRoom' },
+              data: { projectKey, versionNo } });
+            return;
+          }
+          const ack = data.match(/^43(\d+)(\[.*)$/s);
+          if (phase === 'write' && ack?.[1] === String(ackId)) {
+            const [result] = JSON.parse(ack[2]);
+            if (result?.batchId !== batchId) throw new Error('Invalid TeXPage write acknowledgment');
+            if (result.status !== 'ok') throw new Error(`TeXPage rejected write batch: ${result.status}`);
+            offset += batchSize;
+            ackId++;
+            sendBatch();
+            return;
+          }
+          if (!data.startsWith('42')) return;
+          const [event, payload] = JSON.parse(data.slice(2));
+          if (phase === 'room' && event === 'response' && payload?.requestId === 'join') {
+            if (payload.status?.code !== 1) throw new Error('TeXPage project join denied');
+            phase = 'doc';
+            send('joinDoc', { fileKey, ownerKey, projectKey, versionNo, v: 'chunk' });
+            return;
+          }
+          if (payload?.roomId !== roomId) return;
+          if (event === 'clients' && Array.isArray(payload.data) &&
+              payload.data.filter(client => client.userKey === site).length > 1) {
+            throw new Error('VERSION_CONFLICT: close other TeXPage editors using this account before writing');
+          }
+          if (['refresh', 'refreshing', 'resetContent'].includes(event)) {
+            throw new Error('VERSION_CONFLICT: TeXPage refreshed the document during the write');
+          }
+          if (phase !== 'doc' || event !== 'joinedDoc') return;
+
+          const joined = payload.data;
+          if (joined?.isLargeFile) throw new Error('TeXPage opened this document as a read-only large file');
+          if (!Array.isArray(joined?.operations) || typeof joined.v !== 'string' || !joined.v) {
+            throw new Error('Invalid TeXPage joinedDoc state');
+          }
+          const size = joined.total ?? joined.operations.length;
+          documentVersion ??= joined.v;
+          total ??= size;
+          if (joined.v !== documentVersion || !Number.isSafeInteger(total) || size !== total ||
+              existing.length + joined.operations.length > total) throw new Error('Invalid TeXPage document chunks');
+          for (const operation of joined.operations) existing.push(operation);
+          if (existing.length !== total) return;
+
+          phase = 'check';
+          const response = await fetch(fileUrl, { credentials: 'include', cache: 'no-store', signal: controller.signal });
+          if (!response.ok || await response.text() !== expectedText) {
+            throw new Error('VERSION_CONFLICT: document changed before CRDT write');
+          }
+          if (phase !== 'check') return;
+
+          const maxSeqsBySite = Object.create(null);
+          for (const { spliceId } of existing) {
+            if (spliceId) maxSeqsBySite[spliceId.site] = Math.max(maxSeqsBySite[spliceId.site] || 0, spliceId.seq);
+          }
+          const initialSequence = maxSeqsBySite[site] || 0;
+          const chunks = [];
+          let chunk = '';
+          for (const character of text) {
+            if (chunk.length + character.length > chunkSize) { chunks.push(chunk); chunk = ''; }
+            chunk += character;
+          }
+          if (chunk || !chunks.length) chunks.push(chunk);
+          for (const [index, value] of chunks.entries()) {
+            const spliceId = { site, seq: initialSequence + index + 1 };
+            const bounds = { leftDependencyId: { site: 0, seq: 0 }, offsetInLeftDependency: origin,
+              rightDependencyId: { site: 0, seq: 1 }, offsetInRightDependency: origin };
+            const operation = { type: 'splice', spliceId };
+            if (index === 0) operation.deletion = { ...bounds, spliceId, maxSeqsBySite };
+            else {
+              bounds.leftDependencyId = { site, seq: initialSequence + index };
+              bounds.offsetInLeftDependency = extent(chunks[index - 1]);
+            }
+            if (value) operation.insertion = { ...bounds, text: value };
+            outOps.push({ fileKey, versionNo, operation });
+          }
+          phase = 'write';
+          sendBatch();
+        } catch (error) { finish(error); }
       };
-      return await new Promise((resolve, reject) => {
-        const ws = new WebSocket('wss://socket.texpage.com/socket.io/?EIO=4&transport=websocket');
-        let phase = 0;
-        const timer = setTimeout(() => { try { ws.close(); } catch (e) {} reject(new Error('write timeout')); }, ${timeoutMs});
-        const send = (arr) => ws.send('42' + JSON.stringify(arr));
-        const expected = [];
-        let acked = [];
-        ws.onopen = () => ws.send('40');
-        ws.onmessage = async (ev) => {
-          const d = String(ev.data);
-          if (d === '2') { ws.send('3'); return; }
-          if (d.startsWith('40') && phase === 0) {
-            phase = 1;
-            send(['request', { request: { requestId: 'j1', action: 'post:/api/project/joinRoom' },
-              data: { projectKey: P.projectKey, versionNo: P.versionNo } }]);
-            return;
-          }
-          if (phase === 1 && d.includes('"j1"')) {
-            const joined = JSON.parse(d.slice(2))[1];
-            if (joined.requestId !== 'j1' || joined.status?.code !== 1) {
-              clearTimeout(timer); ws.close(); reject(new Error('joinRoom denied')); return;
-            }
-            phase = 2;
-            send(['joinDoc', { fileKey: P.fileKey, ownerKey: P.ownerKey,
-              projectKey: P.projectKey, versionNo: P.versionNo, v: 'chunk' }]);
-            return;
-          }
-          if (phase === 2 && d.includes('joinedDoc')) {
-            phase = 2.5;
-            const ops = JSON.parse(d.slice(2))[1]?.data?.operations;
-            if (!Array.isArray(ops)) {
-              clearTimeout(timer); ws.close(); reject(new Error('Invalid joinedDoc operations')); return;
-            }
-            try {
-              if (typeof P.expectedText !== 'string') throw new Error('Missing write precondition');
-              const url = '/api/project/file?' + new URLSearchParams({
-                fileKey: P.fileKey, projectKey: P.projectKey, versionNo: P.versionNo });
-              const response = await fetch(url, { credentials: 'include' });
-              if (!response.ok || await response.text() !== P.expectedText) {
-                throw new Error('VERSION_CONFLICT: document changed before CRDT write');
-              }
-            } catch (error) {
-              clearTimeout(timer); ws.close(); reject(error); return;
-            }
-            const maxSeqs = {};
-            for (const o of ops) {
-              if (o.spliceId) maxSeqs[o.spliceId.site] = Math.max(maxSeqs[o.spliceId.site] || 0, o.spliceId.seq);
-            }
-            // Use a fresh random siteId per write. The app uses userKey as its
-            // siteId; reusing it here would collide seq numbers with a
-            // concurrently open editor and corrupt its CRDT state
-            // ("\u6587\u6863\u6570\u636E\u5F02\u5E38" dialog + read-only editor there).
-            const site = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
-            const base = 1;
-            const chunks = [];
-            let chunk = '';
-            for (const character of P.text) {
-              if (chunk.length + character.length > CHUNK) { chunks.push(chunk); chunk = ''; }
-              chunk += character;
-            }
-            if (chunk) chunks.push(chunk);
-            const outOps = [];
-            chunks.forEach((chunk, i) => {
-              const spliceId = { site, seq: base + i };
-              const op = { type: 'splice', spliceId };
-              if (i === 0) {
-                op.deletion = {
-                  spliceId,
-                  leftDependencyId: { site: 0, seq: 0 },
-                  offsetInLeftDependency: { row: 0, column: 0 },
-                  rightDependencyId: { site: 0, seq: 1 },
-                  offsetInRightDependency: { row: 0, column: 0 },
-                  maxSeqsBySite: maxSeqs,
-                };
-                op.insertion = {
-                  text: chunk,
-                  leftDependencyId: { site: 0, seq: 0 },
-                  offsetInLeftDependency: { row: 0, column: 0 },
-                  rightDependencyId: { site: 0, seq: 1 },
-                  offsetInRightDependency: { row: 0, column: 0 },
-                };
-              } else {
-                op.insertion = {
-                  text: chunk,
-                  leftDependencyId: { site, seq: base + i - 1 },
-                  offsetInLeftDependency: extent(chunks[i - 1]),
-                  rightDependencyId: { site: 0, seq: 1 },
-                  offsetInRightDependency: { row: 0, column: 0 },
-                };
-              }
-              expected.push(P.fileKey + '.' + spliceId.seq + '.splice');
-              outOps.push({ fileKey: P.fileKey, versionNo: P.versionNo, operation: op });
-            });
-            if (outOps.length === 0) {
-              // Empty replacement content: single deletion-only splice
-              const spliceId = { site, seq: base };
-              expected.push(P.fileKey + '.' + spliceId.seq + '.splice');
-              outOps.push({ fileKey: P.fileKey, versionNo: P.versionNo, operation: {
-                type: 'splice', spliceId,
-                deletion: { spliceId, leftDependencyId: { site: 0, seq: 0 },
-                  offsetInLeftDependency: { row: 0, column: 0 },
-                  rightDependencyId: { site: 0, seq: 1 },
-                  offsetInRightDependency: { row: 0, column: 0 }, maxSeqsBySite: maxSeqs },
-              }});
-            }
-            phase = 3;
-            send(['operations', { syncType: 'sync', operations: outOps }]);
-            return;
-          }
-          if (phase === 3 && d.startsWith('42') && d.includes('mergedOperations')) {
-            try {
-              const ids = JSON.parse(d.slice(2))[1] || [];
-              acked = acked.concat(ids);
-              if (expected.every((x) => acked.includes(x))) {
-                clearTimeout(timer); try { ws.close(); } catch (e) {}
-                resolve({ chunks: expected.length, acked });
-              }
-            } catch (e) {}
-          }
-        };
-        ws.onerror = () => { clearTimeout(timer); reject(new Error('socket error')); };
-      });
-    })()`
-  );
+      socket.onerror = () => finish(new Error('TeXPage write socket error'));
+      socket.onclose = () => finish(new Error('TeXPage write socket closed before acknowledgment'));
+    });
+  }, { ...ref, fileKey, text, timeoutMs, expectedText, site });
 }
 function parseLog(log) {
   const lines = log.split("\n");
